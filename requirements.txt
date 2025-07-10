@@ -1,0 +1,16 @@
+# Core backend and RAG stack
+fastapi
+uvicorn[standard]
+
+# LangChain core and integrations
+langchain
+openai
+
+# Vector database
+chromadb
+
+# PDF loading and parsing
+pypdf
+
+# Optional: for loading .env keys (like your OpenAI key)
+python-dotenv
