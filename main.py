@@ -1,20 +1,25 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
-from typing import List
+from typing import List, Dict
 import logging
 import os
 import re
+import datetime
 
 load_dotenv()
 
-vectordb = None
-qa_chain = None
+# basic auth
+security = HTTPBasic()
+user_sessions: Dict[str, dict] = {}
+query_logs: List[dict] = []
+
 
 class AskRequest(BaseModel):
     query: str
@@ -29,6 +34,51 @@ class AskResponse(BaseModel):
     sources: List[Source]
     confidence: float
     tag: str
+
+class User(BaseModel):
+    username: str
+    is_admin: bool = False
+
+
+def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)) -> User:
+    username = credentials.username
+    password = credentials.password
+    
+
+    is_admin = (username == "admin" and password == "AdminHR2025")
+    
+
+    if not is_admin and len(password) < 1:
+        raise HTTPException(
+            status_code=401,
+            detail="Password cannot be empty",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    
+    user = User(username=username, is_admin=is_admin)
+    
+   
+    user_sessions[username] = {
+        "last_login": datetime.datetime.now(),
+        "is_admin": is_admin,
+        "query_count": user_sessions.get(username, {}).get("query_count", 0)
+    }
+    
+    return user
+
+def log_user_query(username: str, query: str, answer: str, tag: str, confidence: float):
+    query_logs.append({
+        "username": username,
+        "query": query,
+        "answer": answer[:100] + "..." if len(answer) > 100 else answer,
+        "tag": tag,
+        "confidence": confidence,
+        "timestamp": datetime.datetime.now().isoformat()
+    })
+    
+    if username in user_sessions:
+        user_sessions[username]["query_count"] += 1
+
 
 def calculate_confidence(similarity_score: float) -> float:
     return round(0.1 + (similarity_score * 0.85), 2)
@@ -80,10 +130,9 @@ def parse_response_with_tag(full_response: str) -> tuple[str, str]:
     
     return answer, tag
 
-def extract_answer_keywords(answer: str) -> set:
-    stop_words = {'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but', 'in', 'with', 'to', 'for', 'of', 'as', 'by'}
-    answer_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', answer.lower()))
-    return answer_words - stop_words
+
+vectordb = None
+qa_chain = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -143,12 +192,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="HR RAG API", 
-    description="Ask questions about HR policies with intelligent source filtering",
+    description="Ask questions about HR policies with simple authentication",
     lifespan=lifespan
 )
 
+
 @app.post("/ask", response_model=AskResponse)
-async def ask(request: AskRequest):
+async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
     try:
         if not qa_chain or not vectordb:
             raise HTTPException(status_code=500, detail="Services not initialized")
@@ -192,6 +242,9 @@ async def ask(request: AskRequest):
         else:
             overall_confidence = 0.1
         
+
+        log_user_query(user.username, request.query, answer, tag, round(overall_confidence, 2))
+        
         return AskResponse(
             answer=answer,
             sources=sources,
@@ -202,6 +255,53 @@ async def ask(request: AskRequest):
     except Exception as e:
         logging.error(f"Error in /ask endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/admin/dashboard")
+async def admin_dashboard(user: User = Depends(authenticate_user)):
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+
+    total_queries = len(query_logs)
+    unique_users = len(user_sessions)
+    
+ 
+    tag_counts = {}
+    for log in query_logs:
+        tag = log["tag"]
+        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    
+
+    recent_queries = query_logs[-10:] if query_logs else []
+    
+    return {
+        "total_queries": total_queries,
+        "unique_users": unique_users,
+        "tag_distribution": tag_counts,
+        "recent_queries": recent_queries,
+        "active_users": list(user_sessions.keys())
+    }
+
+@app.get("/admin/users")
+async def get_users(user: User = Depends(authenticate_user)):
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    return {
+        "users": user_sessions,
+        "total_users": len(user_sessions)
+    }
+
+@app.get("/admin/queries")
+async def get_all_queries(user: User = Depends(authenticate_user)):
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    return {
+        "queries": query_logs,
+        "total_queries": len(query_logs)
+    }
 
 @app.get("/health")
 async def health_check():
