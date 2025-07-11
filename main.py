@@ -28,6 +28,7 @@ class AskResponse(BaseModel):
     answer: str
     sources: List[Source]
     confidence: float
+    tag: str
 
 def calculate_confidence(similarity_score: float) -> float:
     return round(0.1 + (similarity_score * 0.85), 2)
@@ -57,6 +58,28 @@ def is_source_relevant(query: str, source_content: str, answer: str) -> bool:
     
     return overlap_ratio >= 0.3
 
+def parse_response_with_tag(full_response: str) -> tuple[str, str]:
+    lines = full_response.strip().split('\n')
+    
+    answer_lines = []
+    tag = "miscellaneous"
+    
+    for line in lines:
+        if line.startswith("Tag:"):
+            tag = line.replace("Tag:", "").strip().lower()
+        elif not line.startswith("Tag:"):
+            answer_lines.append(line)
+    
+    answer = '\n'.join(answer_lines).strip()
+    
+    allowed_tags = ["leave", "benefits", "work-arrangements", "performance", 
+                   "policies", "workplace", "issues", "miscellaneous"]
+    
+    if tag not in allowed_tags:
+        tag = "miscellaneous"
+    
+    return answer, tag
+
 def extract_answer_keywords(answer: str) -> set:
     stop_words = {'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but', 'in', 'with', 'to', 'for', 'of', 'as', 'by'}
     answer_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', answer.lower()))
@@ -78,13 +101,25 @@ async def lifespan(app: FastAPI):
         You are an HR assistant. Use the following pieces of context to answer the question.
         If you cannot find relevant information in the context to answer the question, clearly state "I don't have information about this in the HR policies" or similar.
         Do not make up answers. Only use information from the provided context.
-        
+
+        Additionally, categorize this query with ONE of the following tags:
+        - leave: vacation, sick leave, parental leave, time off
+        - benefits: salary, health insurance, retirement, perks, compensation
+        - work-arrangements: remote work, flexible hours, attendance, schedules
+        - performance: reviews, feedback, goals, training, development
+        - policies: code of conduct, compliance, safety, legal requirements
+        - workplace: facilities, technology, communication, office space
+        - issues: grievances, complaints, conflict resolution
+        - miscellaneous: miscellaneous HR topics
+
         Context:
         {context}
-        
+
         Question: {question}
-        
-        Answer:"""
+
+        Answer: [Your answer here]
+        Tag: [One of the 8 tags above]
+        """
         
         prompt = PromptTemplate(
             template=prompt_template,
@@ -119,10 +154,12 @@ async def ask(request: AskRequest):
             raise HTTPException(status_code=500, detail="Services not initialized")
         
         result = qa_chain.invoke({"query": request.query})
-        answer = result.get("result", "")
+        full_response = result.get("result", "")
         
-        if not answer:
+        if not full_response:
             raise HTTPException(status_code=500, detail="Failed to generate answer")
+        
+        answer, tag = parse_response_with_tag(full_response)
         
         docs_with_scores = vectordb.similarity_search_with_score(request.query, k=5)
         
@@ -158,7 +195,8 @@ async def ask(request: AskRequest):
         return AskResponse(
             answer=answer,
             sources=sources,
-            confidence=round(overall_confidence, 2)
+            confidence=round(overall_confidence, 2),
+            tag=tag
         )
         
     except Exception as e:
