@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import datetime
+from fastapi import UploadFile, File
+from document_manager import DocumentManager
 
 load_dotenv()
 
@@ -44,10 +46,8 @@ def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)) -> 
     username = credentials.username
     password = credentials.password
     
-
     is_admin = (username == "admin" and password == "AdminHR2025")
     
-
     if not is_admin and len(password) < 1:
         raise HTTPException(
             status_code=401,
@@ -57,7 +57,6 @@ def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)) -> 
     
     user = User(username=username, is_admin=is_admin)
     
-   
     user_sessions[username] = {
         "last_login": datetime.datetime.now(),
         "is_admin": is_admin,
@@ -134,6 +133,8 @@ def parse_response_with_tag(full_response: str) -> tuple[str, str]:
 vectordb = None
 qa_chain = None
 
+document_manager = DocumentManager()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global vectordb, qa_chain
@@ -196,6 +197,32 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+@app.post("/upload-document")
+async def upload_document(
+    file: UploadFile = File(...),
+    user: User = Depends(authenticate_user)
+):
+    """Upload PDF document (admin only)"""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        result = await document_manager.process_uploaded_file(file)  # Added await here
+        return {
+            "message": "Document uploaded successfully",
+            "filename": result["filename"],
+            "chunks_created": result["chunk_count"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+@app.get("/admin/documents")
+async def get_documents(user: User = Depends(authenticate_user)):
+    """Get uploaded documents list (admin only)"""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    return document_manager.get_document_stats()
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
@@ -242,7 +269,6 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
         else:
             overall_confidence = 0.1
         
-
         log_user_query(user.username, request.query, answer, tag, round(overall_confidence, 2))
         
         return AskResponse(
@@ -256,23 +282,19 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
         logging.error(f"Error in /ask endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-
 @app.get("/admin/dashboard")
 async def admin_dashboard(user: User = Depends(authenticate_user)):
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     
-
     total_queries = len(query_logs)
     unique_users = len(user_sessions)
     
- 
     tag_counts = {}
     for log in query_logs:
         tag = log["tag"]
         tag_counts[tag] = tag_counts.get(tag, 0) + 1
     
-
     recent_queries = query_logs[-10:] if query_logs else []
     
     return {
