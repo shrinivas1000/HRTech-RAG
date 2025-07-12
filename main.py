@@ -85,47 +85,132 @@ def calculate_confidence(similarity_score: float) -> float:
 def create_snippet(content: str, max_length: int = 200) -> str:
     return content[:max_length] + "..." if len(content) > max_length else content
 
+def determine_query_tag(query: str) -> str:
+    """
+    Determine tag based on query keywords - fallback for inconsistent LLM tagging
+    """
+    query_lower = query.lower()
+    
+    # Define keyword patterns for each tag
+    tag_patterns = {
+        "leave": ["leave", "vacation", "sick", "time off", "holiday", "absent", "pto", "maternity", "paternity", "bereavement"],
+        "benefits": ["salary", "pay", "insurance", "health", "dental", "vision", "retirement", "401k", "bonus", "compensation", "benefits", "perks"],
+        "work-arrangements": ["remote", "work from home", "flexible", "schedule", "hours", "attendance", "hybrid", "telecommute"],
+        "performance": ["review", "evaluation", "feedback", "goal", "training", "development", "promotion", "appraisal", "rating"],
+        "policies": ["policy", "rule", "regulation", "compliance", "code of conduct", "guideline", "procedure", "protocol"],
+        "workplace": ["office", "facility", "equipment", "technology", "communication", "space", "environment", "safety"],
+        "issues": ["complaint", "grievance", "conflict", "dispute", "harassment", "discrimination", "problem", "issue", "concern"]
+    }
+    
+    # Check for matches
+    for tag, keywords in tag_patterns.items():
+        if any(keyword in query_lower for keyword in keywords):
+            return tag
+    
+    return "miscellaneous"
+
 def is_source_relevant(query: str, source_content: str, answer: str) -> bool:
-    stop_words = {'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but', 'in', 'with', 'to', 'for', 'of', 'as', 'by', 'can', 'i', 'you', 'we', 'they', 'he', 'she', 'it'}
-    
-    query_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', query.lower()))
-    query_keywords = query_words - stop_words
-    
-    source_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', source_content.lower()))
-    
-    dont_know_phrases = ['don\'t know', 'not sure', 'cannot find', 'no information', 'not available', 'unable to answer']
+    """
+    Balanced relevance checking - not too strict, not too lenient
+    """
+    # Check if answer indicates lack of knowledge
+    dont_know_phrases = [
+        'don\'t know', 'not sure', 'cannot find', 'no information', 
+        'not available', 'unable to answer', 'don\'t have information',
+        'cannot provide', 'not found', 'unclear', 'uncertain'
+    ]
     answer_lower = answer.lower()
     
     if any(phrase in answer_lower for phrase in dont_know_phrases):
         return False
     
-    if len(query_keywords) == 0:
+    # Normalize text
+    query_lower = query.lower().strip()
+    source_lower = source_content.lower().strip()
+    
+    # Skip very short sources that are likely not informative
+    if len(source_content.strip()) < 30:  # Reduced from 50
         return False
     
-    overlap = len(query_keywords.intersection(source_words))
-    overlap_ratio = overlap / len(query_keywords) if query_keywords else 0
+    # Simplified stop words list
+    stop_words = {
+        'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but', 'in', 'with', 'to', 'for', 'of', 'as', 'by', 
+        'can', 'i', 'you', 'we', 'they', 'he', 'she', 'it', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 
+        'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'shall', 'this', 'that'
+    }
     
-    return overlap_ratio >= 0.3
+    # Extract query keywords (lowered minimum length)
+    query_words = re.findall(r'\b[a-zA-Z]{3,}\b', query_lower)
+    query_keywords = [word for word in query_words if word not in stop_words]
+    
+    # Extract source keywords
+    source_words = re.findall(r'\b[a-zA-Z]{3,}\b', source_lower)
+    source_keywords = set(word for word in source_words if word not in stop_words)
+    
+    if not query_keywords:
+        return True  # If no keywords, allow it through
+    
+    # Check for exact phrase matches (highest priority)
+    query_phrases = []
+    for i in range(len(query_words) - 1):
+        phrase = f"{query_words[i]} {query_words[i+1]}"
+        query_phrases.append(phrase)
+    
+    phrase_matches = sum(1 for phrase in query_phrases if phrase in source_lower)
+    
+    # Check individual keyword matches
+    keyword_matches = sum(1 for keyword in query_keywords if keyword in source_keywords)
+    
+    # If we have phrase matches, that's good enough
+    if phrase_matches > 0:
+        return True
+    
+    # Otherwise, check keyword overlap with more lenient threshold
+    total_query_terms = len(query_keywords)
+    keyword_score = keyword_matches / total_query_terms
+    
+    # Require at least 25% keyword overlap OR at least 1 keyword match for short queries
+    return keyword_score >= 0.25 or (len(query_keywords) <= 2 and keyword_matches >= 1)
 
-def parse_response_with_tag(full_response: str) -> tuple[str, str]:
+def parse_response_with_tag(full_response: str, query: str) -> tuple[str, str]:
+    """
+    Enhanced tag parsing with fallback to query-based tagging
+    """
     lines = full_response.strip().split('\n')
     
     answer_lines = []
-    tag = "miscellaneous"
+    extracted_tag = None
     
     for line in lines:
+        line = line.strip()
         if line.startswith("Tag:"):
-            tag = line.replace("Tag:", "").strip().lower()
-        elif not line.startswith("Tag:"):
+            # Extract tag
+            tag_part = line.replace("Tag:", "").strip().lower()
+            # Clean the tag
+            tag_part = re.sub(r'[^\w-]', '', tag_part)
+            if tag_part:
+                extracted_tag = tag_part
+        elif line and not line.startswith("Tag:"):
             answer_lines.append(line)
     
+    # Join answer lines and clean up
     answer = '\n'.join(answer_lines).strip()
     
+    # Clean up answer if it starts with "Answer:"
+    if answer.startswith("Answer:"):
+        answer = answer.replace("Answer:", "").strip()
+    
+    # Validate extracted tag
     allowed_tags = ["leave", "benefits", "work-arrangements", "performance", 
                    "policies", "workplace", "issues", "miscellaneous"]
     
-    if tag not in allowed_tags:
-        tag = "miscellaneous"
+    # Use extracted tag if valid, otherwise determine from query
+    if extracted_tag and extracted_tag in allowed_tags:
+        tag = extracted_tag
+    else:
+        # Fallback to query-based tagging
+        tag = determine_query_tag(query)
+        logging.info(f"Using fallback tag '{tag}' for query: '{query}' (extracted: '{extracted_tag}')")
     
     return answer, tag
 
@@ -147,29 +232,31 @@ async def lifespan(app: FastAPI):
         
         llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
         
-        prompt_template = """
-        You are an HR assistant. Use the following pieces of context to answer the question.
-        If you cannot find relevant information in the context to answer the question, clearly state "I don't have information about this in the HR policies" or similar.
-        Do not make up answers. Only use information from the provided context.
+        # More explicit prompt for consistent tagging
+        prompt_template = """You are an HR assistant. Use the following pieces of context to answer the question.
+If you cannot find relevant information in the context to answer the question, clearly state "I don't have information about this in the HR policies" or similar.
+Do not make up answers. Only use information from the provided context.
 
-        Additionally, categorize this query with ONE of the following tags:
-        - leave: vacation, sick leave, parental leave, time off
-        - benefits: salary, health insurance, retirement, perks, compensation
-        - work-arrangements: remote work, flexible hours, attendance, schedules
-        - performance: reviews, feedback, goals, training, development
-        - policies: code of conduct, compliance, safety, legal requirements
-        - workplace: facilities, technology, communication, office space
-        - issues: grievances, complaints, conflict resolution
-        - miscellaneous: miscellaneous HR topics
+IMPORTANT: You must end your response with exactly one tag line in this format:
+Tag: [tag_name]
 
-        Context:
-        {context}
+Choose exactly ONE tag from these options:
+- leave (for: vacation, sick leave, parental leave, time off, holidays, PTO)
+- benefits (for: salary, health insurance, retirement, perks, compensation, bonuses)
+- work-arrangements (for: remote work, flexible hours, attendance, schedules, hybrid work)
+- performance (for: reviews, feedback, goals, training, development, evaluations)
+- policies (for: code of conduct, compliance, safety, legal requirements, rules)
+- workplace (for: facilities, technology, communication, office space, environment)
+- issues (for: grievances, complaints, conflict resolution, harassment, disputes)
+- miscellaneous (for: any other HR topics not covered above)
 
-        Question: {question}
+Context:
+{context}
 
-        Answer: [Your answer here]
-        Tag: [One of the 8 tags above]
-        """
+Question: {question}
+
+Answer: [Your detailed answer here]
+Tag: [exactly one tag from the list above]"""
         
         prompt = PromptTemplate(
             template=prompt_template,
@@ -207,13 +294,15 @@ async def upload_document(
         raise HTTPException(status_code=403, detail="Admin access required")
     
     try:
-        result = await document_manager.process_uploaded_file(file)  # Added await here
+        result = await document_manager.process_uploaded_file(file)
+        
         return {
             "message": "Document uploaded successfully",
-            "filename": result["filename"],
-            "chunks_created": result["chunk_count"]
+            "filename": result.get("filename", "unknown"),
+            "chunks_created": result.get("chunk_count", 0)
         }
     except Exception as e:
+        logging.error(f"Upload error details: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.get("/admin/documents")
@@ -236,24 +325,30 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
         if not full_response:
             raise HTTPException(status_code=500, detail="Failed to generate answer")
         
-        answer, tag = parse_response_with_tag(full_response)
+        answer, tag = parse_response_with_tag(full_response, request.query)
         
         docs_with_scores = vectordb.similarity_search_with_score(request.query, k=5)
         
         sources = []
         confidence_scores = []
         
-        SIMILARITY_THRESHOLD = 0.5
+        SIMILARITY_THRESHOLD = 0.6  # Relaxed threshold (higher score = less similar)
         
         for doc, similarity_score in docs_with_scores:
+            # Skip documents with low similarity
             if similarity_score > SIMILARITY_THRESHOLD:
                 continue
-                
+            
+            # Use balanced relevance checking
             if not is_source_relevant(request.query, doc.page_content, answer):
                 continue
                 
             confidence = calculate_confidence(1 - similarity_score)
             
+            # More reasonable minimum confidence threshold
+            if confidence < 0.5:
+                continue
+                
             source = Source(
                 snippet=create_snippet(doc.page_content),
                 page=doc.metadata.get("page", 0),
@@ -262,6 +357,7 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
             sources.append(source)
             confidence_scores.append(confidence)
         
+        # Calculate overall confidence
         if confidence_scores and sources:
             base_confidence = max(confidence_scores)
             multi_source_bonus = min(0.05, len(sources) * 0.01)
