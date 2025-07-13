@@ -44,6 +44,121 @@ def ensure_json_serializable(obj: Any) -> Any:
         return [ensure_json_serializable(item) for item in obj]
     return obj
 
+# Enhanced text normalization functions
+def normalize_text_for_matching(text: str) -> str:
+    """Enhanced normalization to handle common variations and synonyms"""
+    text = text.lower().strip()
+    
+    # Handle plural/singular variations
+    text = re.sub(r'\bsick\s+days?\b', 'sick leave', text)
+    text = re.sub(r'\bsick\s+leaves?\b', 'sick leave', text)
+    text = re.sub(r'\bvacation\s+days?\b', 'vacation leave', text)
+    text = re.sub(r'\bvacation\s+leaves?\b', 'vacation leave', text)
+    text = re.sub(r'\bannual\s+days?\b', 'annual leave', text)
+    text = re.sub(r'\bannual\s+leaves?\b', 'annual leave', text)
+    
+    # Handle common synonyms
+    text = text.replace('time off', 'leave')
+    text = text.replace('pto', 'leave')
+    text = text.replace('paid time off', 'leave')
+    
+    # Normalize "how many" patterns
+    text = re.sub(r'\bhow\s+many\s+', '', text)
+    text = re.sub(r'\bdo\s+i\s+have\b', 'entitlement', text)
+    text = re.sub(r'\bam\s+i\s+entitled\s+to\b', 'entitlement', text)
+    
+    return text
+
+def check_query_similarity(query1: str, query2: str) -> bool:
+    """Simple text-based similarity check"""
+    norm_query1 = normalize_text_for_matching(query1)
+    norm_query2 = normalize_text_for_matching(query2)
+    
+    # Check exact match after normalization
+    if norm_query1 == norm_query2:
+        return True
+    
+    # Check if key terms overlap
+    words1 = set(norm_query1.split())
+    words2 = set(norm_query2.split())
+    
+    # Remove common stop words
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+    words1 = words1 - stop_words
+    words2 = words2 - stop_words
+    
+    if not words1 or not words2:
+        return False
+    
+    # Calculate overlap ratio
+    overlap = len(words1.intersection(words2))
+    total_unique = len(words1.union(words2))
+    
+    return overlap / total_unique > 0.6
+
+def is_source_relevant_improved(query: str, source_content: str, answer: str) -> bool:
+    """Enhanced relevance check without sentence transformers"""
+    
+    # If answer indicates no knowledge, reject all sources
+    dont_know_phrases = [
+        'don\'t know', 'don\'t have information', 'no information', 
+        'not available', 'cannot find', 'not sure', 'do not have any knowledge'
+    ]
+    if any(phrase in answer.lower() for phrase in dont_know_phrases):
+        return False
+    
+    # Skip very short sources
+    if len(source_content.strip()) < 50:
+        return False
+    
+    # Normalize query for better matching
+    normalized_query = normalize_text_for_matching(query)
+    query_lower = query.lower()
+    source_lower = source_content.lower()
+    
+    # Check for actual policy content indicators
+    policy_indicators = [
+        'entitled', 'policy', 'days per year', 'certificate required', 
+        'employees are', 'must', 'required', 'allowance', 'allocation'
+    ]
+    has_policy_content = any(indicator in source_lower for indicator in policy_indicators)
+    
+    # Enhanced sick leave logic
+    if 'sick' in normalized_query:
+        has_sick_keywords = any(term in source_lower for term in [
+            'sick leave', 'sick day', 'sick time', 'medical leave', 
+            'medical certificate', '10 days', 'paid sick'
+        ])
+        return has_sick_keywords and has_policy_content
+    
+    # Enhanced vacation/annual leave logic
+    if any(term in normalized_query for term in ['vacation', 'annual', 'holiday']):
+        has_vacation_keywords = any(term in source_lower for term in [
+            'annual leave', 'vacation', 'holiday', '20 days', 
+            '20 working days', 'vacation time', 'annual holiday'
+        ])
+        return has_vacation_keywords and has_policy_content
+    
+    # Enhanced remote work logic
+    if any(term in normalized_query for term in ['remote', 'work from home', 'wfh']):
+        has_remote_keywords = any(term in source_lower for term in [
+            'remote', 'work from home', 'wfh', 'telecommute', 
+            'manager approval', 'hybrid', 'flexible work'
+        ])
+        return has_remote_keywords and has_policy_content
+    
+    # General fallback with improved matching
+    query_terms = [
+        word.lower() for word in normalized_query.split() 
+        if len(word) > 2 and word.lower() not in [
+            'how', 'many', 'what', 'when', 'where', 'does', 'can', 'get', 
+            'do', 'have', 'am', 'entitled', 'to', 'entitlement'
+        ]
+    ]
+    
+    matches = sum(1 for term in query_terms if term in source_lower)
+    return matches >= 1 and has_policy_content
+
 # Pydantic models
 class AskRequest(BaseModel):
     query: str
@@ -125,21 +240,6 @@ def calculate_confidence(similarity_score: float) -> float:
     
     result = 0.1 + ((1 - similarity_score) * 0.85)
     return round(float(result), 2)
-
-def normalize_text_for_matching(text: str) -> str:
-    """Normalize text to handle common variations"""
-    text = text.lower()
-    # Handle plural/singular variations
-    text = text.replace('leaves', 'leave')
-    text = text.replace('days', 'day') 
-    text = text.replace('weeks', 'week')
-    text = text.replace('hours', 'hour')
-    # Handle common synonyms
-    text = text.replace('sick days', 'sick leave')
-    text = text.replace('vacation days', 'annual leave')
-    text = text.replace('time off', 'leave')
-    text = text.replace('pto', 'leave')
-    return text
 
 def create_intelligent_snippet(content: str, query: str = "", max_length: int = 250) -> str:
     """Create intelligent snippet that shows the most relevant content"""
@@ -235,49 +335,6 @@ def determine_query_tag(query: str) -> str:
     
     return "miscellaneous"
 
-def is_source_relevant_improved(query: str, source_content: str, answer: str) -> bool:
-    """Improved relevance check with tighter HR-specific logic"""
-    
-    # If answer says "don't know", reject ALL sources
-    dont_know_phrases = ['don\'t know', 'don\'t have information', 'no information', 'not available', 'cannot find', 'not sure']
-    if any(phrase in answer.lower() for phrase in dont_know_phrases):
-        return False
-    
-    # Skip very short sources
-    if len(source_content.strip()) < 50:
-        return False
-    
-    query_lower = query.lower()
-    source_lower = source_content.lower()
-    
-    # Check for actual policy content indicators
-    policy_indicators = ['entitled', 'policy', 'days per year', 'certificate required', 'employees are', 'must', 'required']
-    has_policy_content = any(indicator in source_lower for indicator in policy_indicators)
-    
-    # Specific HR topic logic
-    if 'sick' in query_lower:
-        has_sick = 'sick' in source_lower
-        has_leave_context = any(term in source_lower for term in ['sick leave', 'sick day', 'medical certificate', '10 days'])
-        return has_sick and has_leave_context and has_policy_content
-    
-    if 'vacation' in query_lower or 'annual' in query_lower:
-        has_vacation = any(term in source_lower for term in ['annual leave', 'vacation', '20 days', '20 working days'])
-        return has_vacation and has_policy_content
-    
-    if 'remote' in query_lower or 'work from home' in query_lower or 'wfh' in query_lower:
-        has_remote = any(term in source_lower for term in ['remote', 'work from home', 'wfh', '3 days', 'manager approval'])
-        return has_remote and has_policy_content
-    
-    if 'benefit' in query_lower:
-        benefit_terms = ['leave', 'days', 'weeks', 'paid', 'entitled']
-        matches = sum(1 for term in benefit_terms if term in source_lower)
-        return matches >= 2 and has_policy_content
-    
-    # General fallback
-    query_terms = [word.lower() for word in query.split() if len(word) > 2 and word.lower() not in ['how', 'many', 'what', 'when', 'where', 'does', 'can', 'get']]
-    matches = sum(1 for term in query_terms if term in source_lower)
-    return matches >= 1 and has_policy_content
-
 def validate_answer_against_sources(answer: str, sources: List[Source], query: str) -> bool:
     """Validate that the answer is actually supported by the sources"""
     
@@ -285,12 +342,17 @@ def validate_answer_against_sources(answer: str, sources: List[Source], query: s
         uncertainty_phrases = ['don\'t know', 'don\'t have information', 'no information']
         return any(phrase in answer.lower() for phrase in uncertainty_phrases)
     
-    # Check if sources are relevant to the query
-    query_lower = query.lower()
-    query_terms = set(re.findall(r'\b[a-zA-Z]{3,}\b', query_lower))
+    # FIX: Use normalized query for term extraction to ensure consistency
+    normalized_query = normalize_text_for_matching(query)
+    query_terms = set(re.findall(r'\b[a-zA-Z]{3,}\b', normalized_query.lower()))
     
-    question_words = {'how', 'what', 'when', 'where', 'why', 'who', 'can', 'should', 'will', 'does', 'get'}
+    question_words = {'how', 'what', 'when', 'where', 'why', 'who', 'can', 'should', 'will', 'does', 'get', 'entitlement'}
     meaningful_query_terms = query_terms - question_words
+    
+    # Add debug output to track validation process
+    print(f"🔍 VALIDATION DEBUG: Original query: '{query}'")
+    print(f"🔍 VALIDATION DEBUG: Normalized query: '{normalized_query}'")
+    print(f"🔍 VALIDATION DEBUG: Meaningful terms: {meaningful_query_terms}")
     
     relevant_sources_count = 0
     
@@ -301,8 +363,12 @@ def validate_answer_against_sources(answer: str, sources: List[Source], query: s
         overlap = len(meaningful_query_terms.intersection(source_terms))
         overlap_ratio = overlap / len(meaningful_query_terms) if meaningful_query_terms else 0
         
+        print(f"🔍 VALIDATION DEBUG: Source overlap ratio: {overlap_ratio:.2f}")
+        
         if overlap_ratio >= 0.3:
             relevant_sources_count += 1
+    
+    print(f"🔍 VALIDATION DEBUG: Relevant sources count: {relevant_sources_count}")
     
     if relevant_sources_count == 0:
         logger.warning(f"No sources relevant to query '{query}'")
@@ -319,13 +385,15 @@ def validate_answer_against_sources(answer: str, sources: List[Source], query: s
     overlap = len(answer_terms.intersection(source_terms))
     overlap_ratio = overlap / len(answer_terms) if answer_terms else 0
     
+    print(f"🔍 VALIDATION DEBUG: Answer-source overlap ratio: {overlap_ratio:.2f}")
+    
     if overlap_ratio < 0.3:
         logger.warning(f"Answer not supported by sources (overlap: {overlap_ratio:.2f})")
         return False
     
-    # Special validation for emergency queries
+    # Special validation for emergency queries (using normalized query)
     emergency_terms = ['earthquake', 'fire', 'emergency', 'safety', 'evacuation', 'disaster']
-    if any(term in query_lower for term in emergency_terms):
+    if any(term in normalized_query.lower() for term in emergency_terms):
         safety_content_found = any(
             any(term in source.snippet.lower() for term in emergency_terms)
             for source in sources
@@ -335,7 +403,9 @@ def validate_answer_against_sources(answer: str, sources: List[Source], query: s
             logger.warning("Emergency query but no safety content in sources")
             return False
     
+    print(f"✅ VALIDATION DEBUG: Validation passed")
     return True
+
 
 def parse_response_with_tag(full_response: str, query: str) -> tuple[str, str]:
     """Enhanced tag parsing with fallback to query-based tagging"""
@@ -507,7 +577,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Document management endpoints
+# Document management endpoints (UNCHANGED)
 @app.post("/admin/upload-document")
 async def upload_document_to_storage(
     file: UploadFile = File(...),
@@ -622,10 +692,9 @@ async def get_documents(admin_user: User = Depends(require_admin)):
     
     return ensure_json_serializable(response_data)
 
-# Query endpoint
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
-    """Ask questions about HR policies using FAISS-powered semantic search"""
+    """Ask questions about HR policies using FAISS-powered semantic search with enhanced text normalization"""
     try:
         if not qa_chain or not vectordb:
             raise HTTPException(
@@ -633,19 +702,32 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
                 detail="No documents have been uploaded yet. Please contact your administrator to upload HR policy documents."
             )
         
-        result = qa_chain.invoke({"query": request.query})
+        # CRITICAL FIX: Normalize query before FAISS search
+        original_query = request.query
+        normalized_query = normalize_text_for_matching(request.query)
+        
+        print(f"\n🔍 DEBUG: Original query: '{original_query}'")
+        print(f"🔍 DEBUG: Normalized query: '{normalized_query}'")
+        
+        # Use original query for LLM processing
+        result = qa_chain.invoke({"query": original_query})
         full_response = result.get("result", "")
         
         if not full_response:
             raise HTTPException(status_code=500, detail="Failed to generate answer")
         
-        answer, tag = parse_response_with_tag(full_response, request.query)
+        answer, tag = parse_response_with_tag(full_response, original_query)
+        print(f"💬 DEBUG: Generated answer: {answer[:100]}...")
         
-        # Get potential sources from FAISS
-        docs_with_scores = vectordb.similarity_search_with_score(request.query, k=5)
+        # FIXED: Use normalized query for FAISS search
+        docs_with_scores = vectordb.similarity_search_with_score(normalized_query, k=5)
         
-        # Enhanced debug output for FAISS
-        logger.info(f"FAISS Query: '{request.query}' - Found {len(docs_with_scores)} potential sources")
+        print(f"📊 DEBUG: Found {len(docs_with_scores)} sources from FAISS")
+        
+        # Debug first few sources
+        for i, (doc, score) in enumerate(docs_with_scores[:3]):
+            print(f"📄 DEBUG Source {i+1}: Score={score:.4f}")
+            print(f"📄 DEBUG Content: {doc.page_content[:100]}...")
         
         sources = []
         confidence_scores = []
@@ -656,20 +738,24 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
             
             # Check similarity threshold
             if similarity_score > 0.9:
+                print(f"❌ DEBUG: Source {i+1} rejected - similarity too high ({similarity_score:.4f})")
                 continue
                 
-            # Check relevance
-            is_relevant = is_source_relevant_improved(request.query, doc.page_content, answer)
+            # Enhanced relevance check with improved text normalization
+            is_relevant = is_source_relevant_improved(original_query, doc.page_content, answer)
+            print(f"🎯 DEBUG: Source {i+1} relevance check: {is_relevant}")
+            
             if not is_relevant:
                 continue
             
             # Calculate confidence
             confidence = calculate_confidence(similarity_score)
             if confidence < 0.4:
+                print(f"❌ DEBUG: Source {i+1} rejected - confidence too low ({confidence})")
                 continue
                 
             # Create intelligent snippet
-            snippet = create_intelligent_snippet(doc.page_content, request.query)
+            snippet = create_intelligent_snippet(doc.page_content, original_query)
             
             source = Source(
                 snippet=snippet,
@@ -678,22 +764,30 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
             )
             sources.append(source)
             confidence_scores.append(confidence)
+            print(f"✅ DEBUG: Source {i+1} ACCEPTED - confidence: {confidence}")
+        
+        print(f"📈 DEBUG: Final sources count: {len(sources)}")
         
         # Validate answer against sources
-        is_valid = validate_answer_against_sources(answer, sources, request.query)
+        is_valid = validate_answer_against_sources(answer, sources, original_query)
         
         if not is_valid:
+            print("🚨 DEBUG: Answer validation failed - returning 'I don't know'")
             answer = "I do not have any knowledge on that, Sorry."
             sources = []
             overall_confidence = 0.1
             tag = "miscellaneous"
         else:
             overall_confidence = max(confidence_scores) if confidence_scores else 0.1
+            print(f"✅ DEBUG: Answer validation passed - confidence: {overall_confidence}")
         
         # Ensure all values are JSON serializable
         overall_confidence = ensure_json_serializable(overall_confidence)
         
-        log_user_query(user.username, request.query, answer, tag, overall_confidence)
+        log_user_query(user.username, original_query, answer, tag, overall_confidence)
+        
+        if len(sources) > 2:
+            sources = sources[:2]
         
         return AskResponse(
             answer=answer,
@@ -706,7 +800,8 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
         logger.error(f"Error in /ask endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Admin dashboard endpoints
+
+# Admin dashboard endpoints (UNCHANGED)
 @app.get("/admin/dashboard")
 async def admin_dashboard(admin_user: User = Depends(require_admin)):
     """Enhanced admin dashboard with FAISS integration info"""
@@ -759,7 +854,7 @@ async def get_all_queries(admin_user: User = Depends(require_admin)):
     
     return ensure_json_serializable(response_data)
 
-# Health check endpoint
+# Health check endpoint (UNCHANGED)
 @app.get("/health")
 async def health_check():
     """Enhanced health check with FAISS status"""
