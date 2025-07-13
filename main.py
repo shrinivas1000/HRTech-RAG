@@ -9,34 +9,33 @@ from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
 from typing import List, Dict, Optional, Any
 import logging
-import os
 import re
 import datetime
 import numpy as np
 from document_manager import DocumentManager
 from pathlib import Path
 
-# Configure logging
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Basic authentication
+
 security = HTTPBasic()
 user_sessions: Dict[str, dict] = {}
 query_logs: List[dict] = []
 
-# Utility function to handle numpy type conversion
+
 def ensure_json_serializable(obj: Any) -> Any:
-    """Convert numpy types to Python types for JSON serialization"""
+
     if isinstance(obj, np.floating):
         return float(obj)
     elif isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
-    elif hasattr(obj, 'item'):  # numpy scalar
+    elif hasattr(obj, 'item'):  
         return obj.item()
     elif isinstance(obj, dict):
         return {key: ensure_json_serializable(value) for key, value in obj.items()}
@@ -44,12 +43,12 @@ def ensure_json_serializable(obj: Any) -> Any:
         return [ensure_json_serializable(item) for item in obj]
     return obj
 
-# Enhanced text normalization functions
+
 def normalize_text_for_matching(text: str) -> str:
-    """Enhanced normalization to handle common variations and synonyms"""
+
     text = text.lower().strip()
     
-    # Handle plural/singular variations
+
     text = re.sub(r'\bsick\s+days?\b', 'sick leave', text)
     text = re.sub(r'\bsick\s+leaves?\b', 'sick leave', text)
     text = re.sub(r'\bvacation\s+days?\b', 'vacation leave', text)
@@ -57,12 +56,12 @@ def normalize_text_for_matching(text: str) -> str:
     text = re.sub(r'\bannual\s+days?\b', 'annual leave', text)
     text = re.sub(r'\bannual\s+leaves?\b', 'annual leave', text)
     
-    # Handle common synonyms
+
     text = text.replace('time off', 'leave')
     text = text.replace('pto', 'leave')
     text = text.replace('paid time off', 'leave')
     
-    # Normalize "how many" patterns
+
     text = re.sub(r'\bhow\s+many\s+', '', text)
     text = re.sub(r'\bdo\s+i\s+have\b', 'entitlement', text)
     text = re.sub(r'\bam\s+i\s+entitled\s+to\b', 'entitlement', text)
@@ -70,19 +69,19 @@ def normalize_text_for_matching(text: str) -> str:
     return text
 
 def check_query_similarity(query1: str, query2: str) -> bool:
-    """Simple text-based similarity check"""
+
     norm_query1 = normalize_text_for_matching(query1)
     norm_query2 = normalize_text_for_matching(query2)
     
-    # Check exact match after normalization
+
     if norm_query1 == norm_query2:
         return True
     
-    # Check if key terms overlap
+
     words1 = set(norm_query1.split())
     words2 = set(norm_query2.split())
     
-    # Remove common stop words
+
     stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
     words1 = words1 - stop_words
     words2 = words2 - stop_words
@@ -90,16 +89,16 @@ def check_query_similarity(query1: str, query2: str) -> bool:
     if not words1 or not words2:
         return False
     
-    # Calculate overlap ratio
+
     overlap = len(words1.intersection(words2))
     total_unique = len(words1.union(words2))
     
     return overlap / total_unique > 0.6
 
 def is_source_relevant_improved(query: str, source_content: str, answer: str) -> bool:
-    """Enhanced relevance check without sentence transformers"""
+
     
-    # If answer indicates no knowledge, reject all sources
+
     dont_know_phrases = [
         'don\'t know', 'don\'t have information', 'no information', 
         'not available', 'cannot find', 'not sure', 'do not have any knowledge'
@@ -107,23 +106,23 @@ def is_source_relevant_improved(query: str, source_content: str, answer: str) ->
     if any(phrase in answer.lower() for phrase in dont_know_phrases):
         return False
     
-    # Skip very short sources
+
     if len(source_content.strip()) < 50:
         return False
     
-    # Normalize query for better matching
+
     normalized_query = normalize_text_for_matching(query)
     query_lower = query.lower()
     source_lower = source_content.lower()
     
-    # Check for actual policy content indicators
+
     policy_indicators = [
         'entitled', 'policy', 'days per year', 'certificate required', 
         'employees are', 'must', 'required', 'allowance', 'allocation'
     ]
     has_policy_content = any(indicator in source_lower for indicator in policy_indicators)
     
-    # Enhanced sick leave logic
+
     if 'sick' in normalized_query:
         has_sick_keywords = any(term in source_lower for term in [
             'sick leave', 'sick day', 'sick time', 'medical leave', 
@@ -131,7 +130,7 @@ def is_source_relevant_improved(query: str, source_content: str, answer: str) ->
         ])
         return has_sick_keywords and has_policy_content
     
-    # Enhanced vacation/annual leave logic
+
     if any(term in normalized_query for term in ['vacation', 'annual', 'holiday']):
         has_vacation_keywords = any(term in source_lower for term in [
             'annual leave', 'vacation', 'holiday', '20 days', 
@@ -139,7 +138,7 @@ def is_source_relevant_improved(query: str, source_content: str, answer: str) ->
         ])
         return has_vacation_keywords and has_policy_content
     
-    # Enhanced remote work logic
+
     if any(term in normalized_query for term in ['remote', 'work from home', 'wfh']):
         has_remote_keywords = any(term in source_lower for term in [
             'remote', 'work from home', 'wfh', 'telecommute', 
@@ -147,7 +146,7 @@ def is_source_relevant_improved(query: str, source_content: str, answer: str) ->
         ])
         return has_remote_keywords and has_policy_content
     
-    # General fallback with improved matching
+
     query_terms = [
         word.lower() for word in normalized_query.split() 
         if len(word) > 2 and word.lower() not in [
@@ -159,7 +158,7 @@ def is_source_relevant_improved(query: str, source_content: str, answer: str) ->
     matches = sum(1 for term in query_terms if term in source_lower)
     return matches >= 1 and has_policy_content
 
-# Pydantic models
+
 class AskRequest(BaseModel):
     query: str
 
@@ -178,16 +177,16 @@ class User(BaseModel):
     username: str
     is_admin: bool = False
 
-# Authentication functions
+
 def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)) -> User:
-    """Enhanced authentication with better error handling"""
+
     username = credentials.username
     password = credentials.password
     
-    # Admin authentication
+
     is_admin = (username == "admin" and password == "AdminHR2025")
     
-    # Basic validation for non-admin users
+
     if not is_admin and len(password) < 1:
         raise HTTPException(
             status_code=401,
@@ -197,7 +196,7 @@ def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)) -> 
     
     user = User(username=username, is_admin=is_admin)
     
-    # Update user session tracking
+
     user_sessions[username] = {
         "last_login": datetime.datetime.now(),
         "is_admin": is_admin,
@@ -207,16 +206,16 @@ def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)) -> 
     return user
 
 def require_admin(user: User = Depends(authenticate_user)) -> User:
-    """Dependency that ensures user is admin - eliminates code duplication"""
+
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
-# Utility functions
+
 def log_user_query(username: str, query: str, answer: str, tag: str, confidence: float):
     """Enhanced query logging with numpy type conversion"""
     try:
-        # Ensure confidence is a Python float
+
         confidence = ensure_json_serializable(confidence)
         
         query_logs.append({
@@ -234,31 +233,31 @@ def log_user_query(username: str, query: str, answer: str, tag: str, confidence:
         logger.error(f"Failed to log user query: {e}")
 
 def calculate_confidence(similarity_score: float) -> float:
-    """Calculate confidence score from similarity with numpy type handling"""
-    # Convert numpy types to Python float
+    
+
     similarity_score = ensure_json_serializable(similarity_score)
     
     result = 0.1 + ((1 - similarity_score) * 0.85)
     return round(float(result), 2)
 
 def create_intelligent_snippet(content: str, query: str = "", max_length: int = 250) -> str:
-    """Create intelligent snippet that shows the most relevant content"""
+   
     if not query:
         return content[:max_length] + "..." if len(content) > max_length else content
     
     query_terms = [term.lower() for term in query.split() if len(term) > 2]
     
-    # Split content into sentences
+
     sentences = re.split(r'[.!?]+', content)
     sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 10]
     
-    # Score sentences by relevance to query
+
     sentence_scores = []
     for sentence in sentences:
         sentence_lower = sentence.lower()
         score = sum(1 for term in query_terms if term in sentence_lower)
         
-        # Bonus for exact phrase matches
+        
         if len(query_terms) > 1:
             query_words = query.lower().split()
             for i in range(len(query_words) - 1):
@@ -269,7 +268,7 @@ def create_intelligent_snippet(content: str, query: str = "", max_length: int = 
         if score > 0:
             sentence_scores.append((score, sentence))
     
-    # Use relevant sentences if found
+   
     if sentence_scores:
         sentence_scores.sort(key=lambda x: x[0], reverse=True)
         
@@ -292,7 +291,7 @@ def create_intelligent_snippet(content: str, query: str = "", max_length: int = 
         
         return result
     
-    # Fallback: find best starting position
+ 
     content_lower = content.lower()
     best_position = 0
     max_matches = 0
@@ -305,7 +304,7 @@ def create_intelligent_snippet(content: str, query: str = "", max_length: int = 
             max_matches = matches
             best_position = i
     
-    # Extract from best position
+   
     if best_position > 0:
         for j in range(best_position, max(0, best_position - 50), -1):
             if content[j] in ' .\n':
@@ -316,7 +315,7 @@ def create_intelligent_snippet(content: str, query: str = "", max_length: int = 
     return snippet.strip() + "..." if len(content) > best_position + max_length else snippet.strip()
 
 def determine_query_tag(query: str) -> str:
-    """Determine tag based on query keywords"""
+    
     query_lower = query.lower()
     
     tag_patterns = {
@@ -336,20 +335,20 @@ def determine_query_tag(query: str) -> str:
     return "miscellaneous"
 
 def validate_answer_against_sources(answer: str, sources: List[Source], query: str) -> bool:
-    """Validate that the answer is actually supported by the sources"""
+    
     
     if not sources:
         uncertainty_phrases = ['don\'t know', 'don\'t have information', 'no information']
         return any(phrase in answer.lower() for phrase in uncertainty_phrases)
     
-    # FIX: Use normalized query for term extraction to ensure consistency
+   
     normalized_query = normalize_text_for_matching(query)
     query_terms = set(re.findall(r'\b[a-zA-Z]{3,}\b', normalized_query.lower()))
     
     question_words = {'how', 'what', 'when', 'where', 'why', 'who', 'can', 'should', 'will', 'does', 'get', 'entitlement'}
     meaningful_query_terms = query_terms - question_words
     
-    # Add debug output to track validation process
+
     print(f"🔍 VALIDATION DEBUG: Original query: '{query}'")
     print(f"🔍 VALIDATION DEBUG: Normalized query: '{normalized_query}'")
     print(f"🔍 VALIDATION DEBUG: Meaningful terms: {meaningful_query_terms}")
@@ -408,7 +407,7 @@ def validate_answer_against_sources(answer: str, sources: List[Source], query: s
 
 
 def parse_response_with_tag(full_response: str, query: str) -> tuple[str, str]:
-    """Enhanced tag parsing with fallback to query-based tagging"""
+
     lines = full_response.strip().split('\n')
     
     answer_lines = []
@@ -442,7 +441,7 @@ def parse_response_with_tag(full_response: str, query: str) -> tuple[str, str]:
     return answer, tag
 
 async def reinitialize_qa_chain():
-    """Reinitialize QA chain after FAISS document processing"""
+
     global vectordb, qa_chain
     
     try:
@@ -583,7 +582,7 @@ async def upload_document_to_storage(
     file: UploadFile = File(...),
     admin_user: User = Depends(require_admin)
 ):
-    """Store document and auto-rebuild FAISS embeddings (admin only)"""
+
     try:
         result = await document_manager.store_uploaded_file(file)
         
@@ -613,11 +612,11 @@ async def remove_document(
     stored_filename: str,
     admin_user: User = Depends(require_admin)
 ):
-    """Remove document and auto-rebuild FAISS embeddings (admin only)"""
+
     success = document_manager.remove_document(stored_filename)
     
     if success:
-        # Reinitialize QA chain after auto-processing
+       
         await reinitialize_qa_chain()
         
         response_data = {
@@ -632,11 +631,10 @@ async def remove_document(
 
 @app.post("/admin/process-documents")
 async def process_all_documents(admin_user: User = Depends(require_admin)):
-    """Process all documents in data/ folder and rebuild FAISS index (admin only)"""
+
     try:
         result = document_manager.process_all_documents()
-        
-        # Reinitialize QA chain after processing
+       
         await reinitialize_qa_chain()
         
         response_data = {
@@ -656,7 +654,7 @@ async def process_all_documents(admin_user: User = Depends(require_admin)):
 
 @app.get("/admin/documents/status")
 async def get_document_status(admin_user: User = Depends(require_admin)):
-    """Get status of all documents with FAISS index info (admin only)"""
+
     stats = document_manager.get_document_stats()
     
     response_data = {
@@ -677,7 +675,7 @@ async def get_document_status(admin_user: User = Depends(require_admin)):
 
 @app.get("/admin/documents")
 async def get_documents(admin_user: User = Depends(require_admin)):
-    """Get uploaded documents list with FAISS integration info (admin only)"""
+
     stats = document_manager.get_document_stats()
     
     response_data = {
@@ -694,7 +692,7 @@ async def get_documents(admin_user: User = Depends(require_admin)):
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
-    """Ask questions about HR policies using FAISS-powered semantic search with enhanced text normalization"""
+    
     try:
         if not qa_chain or not vectordb:
             raise HTTPException(
@@ -702,14 +700,14 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
                 detail="No documents have been uploaded yet. Please contact your administrator to upload HR policy documents."
             )
         
-        # CRITICAL FIX: Normalize query before FAISS search
+        
         original_query = request.query
         normalized_query = normalize_text_for_matching(request.query)
         
         print(f"\n🔍 DEBUG: Original query: '{original_query}'")
         print(f"🔍 DEBUG: Normalized query: '{normalized_query}'")
         
-        # Use original query for LLM processing
+        
         result = qa_chain.invoke({"query": original_query})
         full_response = result.get("result", "")
         
@@ -719,12 +717,12 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
         answer, tag = parse_response_with_tag(full_response, original_query)
         print(f"💬 DEBUG: Generated answer: {answer[:100]}...")
         
-        # FIXED: Use normalized query for FAISS search
+        
         docs_with_scores = vectordb.similarity_search_with_score(normalized_query, k=5)
         
         print(f"📊 DEBUG: Found {len(docs_with_scores)} sources from FAISS")
         
-        # Debug first few sources
+
         for i, (doc, score) in enumerate(docs_with_scores[:3]):
             print(f"📄 DEBUG Source {i+1}: Score={score:.4f}")
             print(f"📄 DEBUG Content: {doc.page_content[:100]}...")
@@ -733,28 +731,28 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
         confidence_scores = []
         
         for i, (doc, similarity_score) in enumerate(docs_with_scores):
-            # Convert numpy float32 to Python float
+            
             similarity_score = ensure_json_serializable(similarity_score)
             
-            # Check similarity threshold
+            
             if similarity_score > 0.9:
                 print(f"❌ DEBUG: Source {i+1} rejected - similarity too high ({similarity_score:.4f})")
                 continue
                 
-            # Enhanced relevance check with improved text normalization
+         
             is_relevant = is_source_relevant_improved(original_query, doc.page_content, answer)
             print(f"🎯 DEBUG: Source {i+1} relevance check: {is_relevant}")
             
             if not is_relevant:
                 continue
             
-            # Calculate confidence
+            
             confidence = calculate_confidence(similarity_score)
             if confidence < 0.4:
                 print(f"❌ DEBUG: Source {i+1} rejected - confidence too low ({confidence})")
                 continue
                 
-            # Create intelligent snippet
+            
             snippet = create_intelligent_snippet(doc.page_content, original_query)
             
             source = Source(
@@ -768,7 +766,7 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
         
         print(f"📈 DEBUG: Final sources count: {len(sources)}")
         
-        # Validate answer against sources
+    
         is_valid = validate_answer_against_sources(answer, sources, original_query)
         
         if not is_valid:
@@ -781,7 +779,7 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
             overall_confidence = max(confidence_scores) if confidence_scores else 0.1
             print(f"✅ DEBUG: Answer validation passed - confidence: {overall_confidence}")
         
-        # Ensure all values are JSON serializable
+        
         overall_confidence = ensure_json_serializable(overall_confidence)
         
         log_user_query(user.username, original_query, answer, tag, overall_confidence)
@@ -801,10 +799,10 @@ async def ask(request: AskRequest, user: User = Depends(authenticate_user)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# Admin dashboard endpoints (UNCHANGED)
+
 @app.get("/admin/dashboard")
 async def admin_dashboard(admin_user: User = Depends(require_admin)):
-    """Enhanced admin dashboard with FAISS integration info"""
+    
     total_queries = len(query_logs)
     unique_users = len(user_sessions)
     
@@ -815,7 +813,7 @@ async def admin_dashboard(admin_user: User = Depends(require_admin)):
     
     recent_queries = query_logs[-10:] if query_logs else []
     
-    # Get vectorstore status
+
     stats = document_manager.get_document_stats()
     
     response_data = {
@@ -836,7 +834,7 @@ async def admin_dashboard(admin_user: User = Depends(require_admin)):
 
 @app.get("/admin/users")
 async def get_users(admin_user: User = Depends(require_admin)):
-    """Get user information (admin only)"""
+    
     response_data = {
         "users": user_sessions,
         "total_users": len(user_sessions)
@@ -846,7 +844,7 @@ async def get_users(admin_user: User = Depends(require_admin)):
 
 @app.get("/admin/queries")
 async def get_all_queries(admin_user: User = Depends(require_admin)):
-    """Get all query logs (admin only)"""
+   
     response_data = {
         "queries": query_logs,
         "total_queries": len(query_logs)
@@ -854,10 +852,10 @@ async def get_all_queries(admin_user: User = Depends(require_admin)):
     
     return ensure_json_serializable(response_data)
 
-# Health check endpoint (UNCHANGED)
+
 @app.get("/health")
 async def health_check():
-    """Enhanced health check with FAISS status"""
+    
     stats = document_manager.get_document_stats()
     
     response_data = {
